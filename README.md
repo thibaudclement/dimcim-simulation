@@ -1,4 +1,4 @@
-# DimCiM Research: HDC-on-CiM Noise Tolerance and Energy Savings
+# DimCiM Research Project: HDC-on-CiM Noise Tolerance and Energy Savings
 
 This repository contains the simulator and experiment scripts for:
 
@@ -17,8 +17,8 @@ This project targets Python 3.10+ (tested with 3.11/3.12).
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/thibaudclement/dimcim-research.git
-cd dimcim-research
+git clone https://github.com/thibaudclement/dimcim-simulation.git
+cd dimcim-simulation
 ```
 
 2. (Recommended) Create and activate a virtual environment:
