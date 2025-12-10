@@ -233,6 +233,166 @@ class HDCClassifier:
         enc = self.encode(X, noise=noise, quant_bits=quant_bits)
         sims = enc @ self.class_hv.T
         return np.argmax(sims, axis=1)
+    
+
+# -------------------- LDC-style gradient-trained HDC model --------------------
+
+class LDCClassifier:
+    """
+    Gradient-trained HDC-style classifier (LDC-like):
+    - Learnable projection W (D x F) and class hypervectors H (C x D).
+    - Trained with softmax cross-entropy via manual gradient descent.
+    - After training, learn 8-bit quantization ranges from training projections.
+      and reuse the same noise + quantization path as HDCClassifier.
+    """
+    def __init__(self, d=512, n_features=64, n_classes=10, seed=123,
+                 lr=0.05, epochs=20, batch_size=256, l2_reg=1e-4):
+        self.d = d
+        self.n_features = n_features
+        self.n_classes = n_classes
+        self.lr = float(lr)
+        self.epochs = int(epochs)
+        self.batch_size = int(batch_size)
+        self.l2_reg = float(l2_reg)
+
+        rng = np.random.default_rng(seed)
+        # Learnable projection and class weights (real-valued)
+        self.W = rng.normal(0, 1.0 / np.sqrt(n_features),
+                            size=(d, n_features)).astype(np.float32)
+        self.H = rng.normal(0, 1.0 / np.sqrt(d),
+                            size=(n_classes, d)).astype(np.float32)
+
+        self.q_step_8 = None
+        self.q_rng = None
+
+    @staticmethod
+    def _softmax(logits):
+        logits = logits - np.max(logits, axis=1, keepdims=True)
+        exp = np.exp(logits)
+        return exp / np.sum(exp, axis=1, keepdims=True)
+
+    @staticmethod
+    def _one_hot(y, n_classes):
+        N = y.shape[0]
+        Y = np.zeros((N, n_classes), dtype=np.float32)
+        Y[np.arange(N), y] = 1.0
+        return Y
+
+    def _quantize_with_bits(self, y, bits: int):
+        """
+        Quantize analog projection y using an effective ADC resolution 'bits'.
+        """
+        if self.q_step_8 is None or self.q_rng is None:
+            return y
+        scale = 2 ** (8 - int(bits))
+        step_b = self.q_step_8 * scale
+        y = np.clip(y, -self.q_rng, self.q_rng)
+        return np.round(y / step_b) * step_b
+
+    def encode(self, X, noise=None, quant_bits=None, binarize=False):
+        """
+        Project a batch of inputs with learned W, optionally apply noise + quantization.
+        For LDC/MAP-style inference we keep y real-valued by default.
+        """
+        y = X @ self.W.T
+
+        if noise is not None and noise.get('sigma', 0) > 0:
+            sigma = float(noise['sigma'])
+            if noise['type'] == 'additive':
+                y = y + np.random.normal(0, sigma, size=y.shape)
+            elif noise['type'] == 'multiplicative':
+                y = y * (1.0 + np.random.normal(0, sigma, size=y.shape))
+
+        if quant_bits is not None:
+            y = self._quantize_with_bits(y, quant_bits)
+
+        if binarize:
+            y = bipolar_sign(y)
+
+        return y
+
+    def fit(self, X, y, quant_bits=8, per_dim=False, verbose=False):
+        """
+        Train W and H with gradient descent, then learn 8-bit quantization ranges
+        from training projections.
+
+        Args:
+            X: Training features [n_samples, n_features].
+            y: Integer labels [n_samples].
+            quant_bits: Unused (kept for API compatibility).
+            per_dim: If True, use per-dimension statistics for quantization.
+            verbose: If True, prints simple training loss/accuracy per epoch.
+        """
+        rng = np.random.default_rng(12345)
+        N = X.shape[0]
+        C = self.n_classes
+
+        for epoch in range(self.epochs):
+            # Shuffle indices
+            idx = rng.permutation(N)
+            X_shuf = X[idx]
+            y_shuf = y[idx]
+
+            for start in range(0, N, self.batch_size):
+                end = min(start + self.batch_size, N)
+                xb = X_shuf[start:end]
+                yb = y_shuf[start:end]
+
+                B = xb.shape[0]
+                if B == 0:
+                    continue
+
+                # Forward pass
+                z = xb @ self.W.T
+                logits = z @ self.H.T
+                P = self._softmax(logits)
+                Y = self._one_hot(yb, C)
+
+                # Cross-entropy gradient wrt logits
+                grad_logits = (P - Y) / float(B)
+
+                # Gradients
+                grad_H = grad_logits.T @ z
+                grad_z = grad_logits @ self.H
+                grad_W = grad_z.T @ xb
+
+                # L2 regularization
+                if self.l2_reg > 0.0:
+                    grad_W += self.l2_reg * self.W
+                    grad_H += self.l2_reg * self.H
+
+                # Parameter update
+                self.W -= self.lr * grad_W
+                self.H -= self.lr * grad_H
+
+            if verbose:
+                # Simple epoch-level accuracy estimate
+                z_full = X @ self.W.T
+                logits_full = z_full @ self.H.T
+                preds = np.argmax(logits_full, axis=1)
+                acc = (preds == y).mean()
+                print(f"[LDC] epoch {epoch+1}/{self.epochs} train_acc={acc:.4f}")
+
+        # After training, learn quantization ranges from training projections
+        Ytr = X @ self.W.T
+        if per_dim:
+            std = np.std(Ytr, axis=0, keepdims=True) + 1e-9
+        else:
+            std = np.array([[np.std(Ytr) + 1e-9]])
+        levels_8 = 2 ** 8
+        self.q_rng   = 3.0 * std
+        self.q_step_8 = (2.0 * self.q_rng) / levels_8
+
+    def predict(self, X, noise=None, quant_bits=None):
+        """
+        Predict labels for a batch of inputs, with optional noise/quantization.
+
+        We use real-valued encoded features and class weights (LDC/MAP-style),
+        so inference is consistent with how the model was trained.
+        """
+        enc = self.encode(X, noise=noise, quant_bits=quant_bits, binarize=False)
+        logits = enc @ self.H.T  # [N, C]
+        return np.argmax(logits, axis=1)
 
 # -------------------- Energy model --------------------
 
@@ -282,12 +442,17 @@ def run_sweep(X_train, y_train, X_test, y_test,
               bits_list=(3, 4, 5, 6, 8),
               d=512, n_features=64, n_classes=10,
               seeds=1, proj_seed=123, proj_seeds=1, quant_per_dim=False,
-              e_mac_pj=0.5, e_adc_8bit_pj=10.0, verbose=True):
+              e_mac_pj=0.5, e_adc_8bit_pj=10.0, verbose=True,
+              training='vanilla'):
     """
     Sweep over noise amplitudes and bit-depths, averaging across projections and noise draws.
 
     Fit once per projection at 8-bit to learn an 8-bit step, then evaluate across
     requested bit-depths. Returns a DataFrame with mean accuracy, std, and energy.
+
+    Args:
+        training: 'vanilla' uses HDCClassifier (random projection + bundling),
+                  'ldc' uses LDCClassifier (gradient-trained).
     """
     em  = EnergyModel(d=d, n_features=n_features, n_classes=n_classes,
                       e_mac_pj=e_mac_pj, e_adc_8bit_pj=e_adc_8bit_pj)
@@ -300,11 +465,17 @@ def run_sweep(X_train, y_train, X_test, y_test,
     if verbose:
         print(f"[sweep] noise={noise_type} | proj_seeds={proj_seeds} | seeds={seeds} "
               f"| points={len(bits_list)}x{len(sigmas)} => {total} evals")
+        print(f"[sweep] training={training}")
 
     for pidx in range(proj_seeds):
-        # New random projection per pidx
-        clf = HDCClassifier(d=d, n_features=n_features, n_classes=n_classes,
-                            seed=proj_seed + pidx)
+        # New random init per pidx
+        if training == 'ldc':
+            clf = LDCClassifier(d=d, n_features=n_features, n_classes=n_classes,
+                                seed=proj_seed + pidx)
+        else:
+            clf = HDCClassifier(d=d, n_features=n_features, n_classes=n_classes,
+                                seed=proj_seed + pidx)
+
         clf.fit(X_train, y_train, quant_bits=8, per_dim=quant_per_dim)
 
         for bits in bits_list:
@@ -395,9 +566,6 @@ def main():
     """
     Parse command-line arguments, load the requested dataset, configure the
     energy model, run the noise/bit-depth sweep, and write CSV + plots.
-
-    This function is the CLI front-end used to reproduce the experiments
-    reported in the associated paper.
     """
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", type=str, default="synthetic",
@@ -411,9 +579,9 @@ def main():
     ap.add_argument("--seeds", type=int, default=1,
                     help="Noise draws averaged per (sigma,bits,projection)")
     ap.add_argument("--proj-seed", type=int, default=123,
-                    help="Base seed for random projection")
+                    help="Base seed for random projection / init")
     ap.add_argument("--proj-seeds", type=int, default=1,
-                    help="Number of different projections to average over")
+                    help="Number of different projections/inits to average over")
     ap.add_argument("--noise", type=str, default="additive",
                     choices=["additive","multiplicative"])
     ap.add_argument("--sep", type=float, default=1.0)
@@ -447,16 +615,20 @@ def main():
     if args.dataset == "digits":
         X_train, y_train, X_test, y_test = load_digits_split(seed=42)
         n_features = X_train.shape[1]; n_classes = len(np.unique(y_train))
+        training_mode = 'vanilla'
     elif args.dataset == "mnist":
         ncomp = args.features if args.features > 0 and args.features < 784 else None
         X_train, y_train, X_test, y_test = load_mnist_split(seed=42, n_components=ncomp)
         n_features = X_train.shape[1]; n_classes = len(np.unique(y_train))
+        # Use gradient-trained LDCClassifier for MNIST
+        training_mode = 'ldc'
     else:
         X_train, y_train, X_test, y_test = load_synthetic(
             n_classes=args.classes, n_features=args.features,
             sep=args.sep, cov_sigma=args.cov_sigma, seed=42
         )
         n_features = args.features; n_classes = args.classes
+        training_mode = 'vanilla'
 
     # Energy presets
     # Defaults from earlier runs: E_MAC=0.5 pJ, E_ADC8=10 pJ
@@ -473,7 +645,7 @@ def main():
     sigmas = np.linspace(0.0, float(args.sigma_max), int(args.sigma_steps))
     bits_list = (3, 4, 5, 6, 8)
 
-    # Run sweep with projection + noise averaging and progress logs
+    # Run sweep with projection/init + noise averaging and progress logs
     df = run_sweep(
         X_train, y_train, X_test, y_test,
         noise_type=args.noise,
@@ -481,7 +653,7 @@ def main():
         d=args.d, n_features=n_features, n_classes=n_classes,
         seeds=args.seeds, proj_seed=args.proj_seed, proj_seeds=args.proj_seeds,
         quant_per_dim=args.per_dim_quant, e_mac_pj=e_mac_pj, e_adc_8bit_pj=e_adc8_pj,
-        verbose=True
+        verbose=True, training=training_mode
     )
 
     # Save aggregated results

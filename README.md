@@ -64,13 +64,13 @@ The paper evaluates a 10-class MNIST classifier with:
 ### 1. Additive noise — Default energy regime (baseline)
 
 ```bash
-python dim_cim.py --dataset mnist --features 128 --d 1024   --noise additive --sigma-max 0.2 --sigma-steps 17   --per-dim-quant --seeds 10 --proj-seeds 3   --regime default   --ylim-bits-min 0.7620 --ylim-bits-max 0.7690   --ylim-sigma-min 0.7620 --ylim-sigma-max 0.7690   --outdir data/output/mnist_add_default
+python dim_cim.py --dataset mnist --features 128 --d 1024 --noise additive --sigma-max 0.2 --sigma-steps 17 --per-dim-quant --seeds 10 --proj-seeds 3 --regime default --ylim-bits-min 0.9070 --ylim-bits-max 0.9130 --ylim-sigma-min 0.9070 --ylim-sigma-max 0.9130 --outdir data/output/mnist_add_default_ldc_tight
 ```
 
 ### 2. Multiplicative noise — Default energy regime (sanity check)
 
 ```bash
-python dim_cim.py --dataset mnist --features 128 --d 1024   --noise multiplicative --sigma-max 0.2 --sigma-steps 17   --per-dim-quant --seeds 10 --proj-seeds 3   --regime default   --_ylim-bits-min 0.7620 --ylim-bits-max 0.7690   --ylim-sigma-min 0.7620 --ylim-sigma-max 0.7690   --outdir data/output/mnist_mul_default
+python dim_cim.py --dataset mnist --features 128 --d 1024 --noise multiplicative --sigma-max 0.2 --sigma-steps 17 --per-dim-quant --seeds 10 --proj-seeds 3 --regime default --ylim-bits-min 0.9070 --ylim-bits-max 0.9130 --ylim-sigma-min 0.9070 --ylim-sigma-max 0.9130 --outdir data/output/mnist_mul_default_ldc_tight
 ```
 
 _**Note:** As discussed in the paper, multiplicative noise has an even smaller impact on accuracy than additive noise. The corresponding plots are therefore omitted from the main text and used primarily as a sanity check confirming that additive perturbations—not gain variation—are the dominant accuracy-relevant non-idealities in this model._
@@ -78,7 +78,7 @@ _**Note:** As discussed in the paper, multiplicative noise has an even smaller i
 ### 3. Additive noise — ADC-dominated regime (steeper knee)
 
 ```bash
-python dim_cim.py --dataset mnist --features 128 --d 1024   --noise additive --sigma-max 0.2 --sigma-steps 17   --per-dim-quant --seeds 10 --proj-seeds 3   --e-mac-pj 0.15 --e-adc8-pj 60   --ylim-bits-min 0.7620 --ylim-bits-max 0.7690   --ylim-sigma-min 0.7620 --ylim-sigma-max 0.7690   --outdir data/output/mnist_add_adcdom
+python dim_cim.py --dataset mnist --features 128 --d 1024 --noise additive --sigma-max 0.2 --sigma-steps 17 --per-dim-quant --seeds 10 --proj-seeds 3 --regime default --e-mac-pj 0.15 --e-adc8-pj 60 --ylim-bits-min 0.9070 --ylim-bits-max 0.9130 --ylim-sigma-min 0.9070 --ylim-sigma-max 0.9130 --outdir data/output/mnist_add_adcdom_ldc_tight
 ```
 
 ---
